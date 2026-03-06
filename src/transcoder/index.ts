@@ -330,15 +330,21 @@ async function selfDestruct() {
   console.log("[DO] Queue empty, self-destructing droplet...");
   try {
     // Get our own droplet ID from metadata
-    const res = await fetch("http://169.254.169.254/metadata/v1/id");
-    const dropletId = await res.text();
+    const metaRes = await fetch("http://169.254.169.254/metadata/v1/id");
+    const dropletId = (await metaRes.text()).trim();
+    console.log(`[DO] Droplet ID: ${dropletId}`);
 
-    await fetch(`https://api.digitalocean.com/v2/droplets/${dropletId}`, {
+    const delRes = await fetch(`https://api.digitalocean.com/v2/droplets/${dropletId}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${process.env.DO_API_TOKEN}` },
     });
 
-    console.log("[DO] Self-destruct request sent");
+    if (delRes.status === 204) {
+      console.log("[DO] Self-destruct successful");
+    } else {
+      const body = await delRes.text();
+      console.error(`[DO] Self-destruct failed (${delRes.status}): ${body}`);
+    }
   } catch (err) {
     console.error("[DO] Self-destruct failed:", err);
   }

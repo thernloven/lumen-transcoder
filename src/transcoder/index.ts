@@ -281,7 +281,7 @@ async function processJob(job: TranscodeJob) {
 
     const videoArgs = canCopyVideo
       ? ["-c:v", "copy"]
-      : ["-c:v", "libx264", "-preset", "fast", "-crf", "20", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p"];
+      : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p"];
 
     const audioArgs = hasAudio
       ? ["-map", "0:a:0", "-c:a", "aac", "-ac", "2", "-b:a", "192k"]
@@ -411,7 +411,8 @@ async function main() {
   }
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error("Fatal transcoder error:", err);
+  if (IS_DROPLET) await selfDestruct();
   process.exit(1);
 });

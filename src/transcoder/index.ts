@@ -281,7 +281,8 @@ async function processJob(job: TranscodeJob) {
 
     const videoArgs = canCopyVideo
       ? ["-c:v", "copy"]
-      : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p"];
+      : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
+        "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"];
 
     const audioArgs = hasAudio
       ? ["-map", "0:a:0", "-c:a", "aac", "-ac", "2", "-b:a", "192k"]

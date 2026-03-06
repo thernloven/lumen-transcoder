@@ -351,19 +351,14 @@ async function main() {
   // Clean up any leftover temp files on startup
   try { fs.rmSync(WORK_DIR, { recursive: true, force: true }); fs.mkdirSync(WORK_DIR, { recursive: true }); } catch {}
 
-  const activeJobs = new Map<string, Promise<void>>();
+  const activeJobs = new Map<string, { done: boolean }>();
   let idleSince: number | null = null;
 
   while (true) {
     try {
       // Clean up completed jobs
-      for (const [id, promise] of activeJobs) {
-        // Check if promise is settled by racing with an already-resolved promise
-        const settled = await Promise.race([
-          promise.then(() => true, () => true),
-          Promise.resolve(false),
-        ]);
-        if (settled) activeJobs.delete(id);
+      for (const [id, state] of activeJobs) {
+        if (state.done) activeJobs.delete(id);
       }
 
       // Fill up to MAX_CONCURRENT slots
@@ -376,7 +371,8 @@ async function main() {
         idleSince = null;
         console.log(`\nProcessing: "${job.title}" (${job.type}) [${activeJobs.size + 1}/${MAX_CONCURRENT}]`);
 
-        const jobPromise = processJob(job).catch(async (jobErr) => {
+        const state = { done: false };
+        processJob(job).catch(async (jobErr) => {
           console.error(`[ERROR] Job failed for "${job.title}":`, jobErr);
           if (job.type === "movie") {
             await query(`UPDATE content SET status = 'error' WHERE id = $1`, [job.content_id]).catch(() => {});
@@ -386,9 +382,9 @@ async function main() {
               [job.content_id, job.season_number, job.episode_number]
             ).catch(() => {});
           }
-        });
+        }).finally(() => { state.done = true; });
 
-        activeJobs.set(job.id, jobPromise);
+        activeJobs.set(job.id, state);
       }
 
       // If no active jobs, track idle time

@@ -166,13 +166,17 @@ function hasAudioStream(inputPath: string): Promise<boolean> {
   });
 }
 
-// Probe video codec name and pixel format
-function probeVideoCodec(inputPath: string): Promise<{ codec: string | null; pixFmt: string | null }> {
+// Probe video codec, pixel format, and color metadata
+function probeVideoCodec(inputPath: string): Promise<{
+  codec: string | null; pixFmt: string | null;
+  colorSpace: string | null; colorPrimaries: string | null;
+  colorTrc: string | null; colorRange: string | null;
+}> {
   return new Promise((resolve) => {
     const proc = spawn("ffprobe", [
       "-v", "quiet",
       "-select_streams", "v:0",
-      "-show_entries", "stream=codec_name,pix_fmt",
+      "-show_entries", "stream=codec_name,pix_fmt,color_space,color_primaries,color_transfer,color_range",
       "-print_format", "json",
       inputPath,
     ]);
@@ -185,13 +189,20 @@ function probeVideoCodec(inputPath: string): Promise<{ codec: string | null; pix
       try {
         const data = JSON.parse(output);
         const stream = data.streams?.[0];
-        resolve({ codec: stream?.codec_name || null, pixFmt: stream?.pix_fmt || null });
+        resolve({
+          codec: stream?.codec_name || null,
+          pixFmt: stream?.pix_fmt || null,
+          colorSpace: stream?.color_space || null,
+          colorPrimaries: stream?.color_primaries || null,
+          colorTrc: stream?.color_transfer || null,
+          colorRange: stream?.color_range || null,
+        });
       } catch {
-        resolve({ codec: null, pixFmt: null });
+        resolve({ codec: null, pixFmt: null, colorSpace: null, colorPrimaries: null, colorTrc: null, colorRange: null });
       }
     });
 
-    proc.on("error", () => resolve({ codec: null, pixFmt: null }));
+    proc.on("error", () => resolve({ codec: null, pixFmt: null, colorSpace: null, colorPrimaries: null, colorTrc: null, colorRange: null }));
   });
 }
 
@@ -269,20 +280,28 @@ async function processJob(job: TranscodeJob) {
     const mp4Path = path.join(jobDir, "stream.mp4");
 
     // Check if video can be stream-copied (H.264 only)
-    const { codec: videoCodec, pixFmt } = await probeVideoCodec(inputPath);
+    const { codec: videoCodec, pixFmt, colorSpace, colorPrimaries, colorTrc, colorRange } = await probeVideoCodec(inputPath);
     const hasAudio = await hasAudioStream(inputPath);
     const canCopyVideo = videoCodec === "h264";
 
     if (canCopyVideo) {
       console.log(`[REMUX] Copying video (${videoCodec}, ${pixFmt})${hasAudio ? ", re-encoding audio" : ", no audio"}: "${job.title}"`);
     } else {
-      console.log(`[TRANSCODE] Re-encoding video (${videoCodec || "unknown"}, ${pixFmt} → H.264)${hasAudio ? "" : ", no audio"}: "${job.title}"`);
+      console.log(`[TRANSCODE] Re-encoding video (${videoCodec || "unknown"}, ${pixFmt} → H.264, color: ${colorSpace}/${colorRange})${hasAudio ? "" : ", no audio"}: "${job.title}"`);
+    }
+
+    const colorArgs: string[] = [];
+    if (!canCopyVideo) {
+      colorArgs.push("-colorspace", colorSpace || "bt709");
+      colorArgs.push("-color_primaries", colorPrimaries || "bt709");
+      colorArgs.push("-color_trc", colorTrc || "bt709");
+      colorArgs.push("-color_range", colorRange || "tv");
     }
 
     const videoArgs = canCopyVideo
       ? ["-c:v", "copy"]
       : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
-        "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"];
+        ...colorArgs];
 
     const audioArgs = hasAudio
       ? ["-map", "0:a:0", "-c:a", "aac", "-ac", "2", "-b:a", "192k"]
@@ -334,7 +353,7 @@ async function selfDestruct() {
     const dropletId = (await metaRes.text()).trim();
     console.log(`[DO] Droplet ID: ${dropletId}`);
 
-    const delRes = await fetch(`https://api.digitalocean.com/v2/droplets/${dropletId}`, {
+    const delRes = await fetch(`https://api.digitalocean.com/v2/droplets?tag_name=aperture-transcoder`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${process.env.DO_API_TOKEN}` },
     });

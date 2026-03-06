@@ -1,0 +1,22 @@
+{
+  "name": "aperture-transcoder",
+  "version": "1.0.0",
+  "description": "On-demand video transcoder for Aperture",
+  "scripts": {
+    "start": "tsx src/transcoder/index.ts",
+    "build": "tsc",
+    "start:built": "node dist/transcoder/index.js"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1000.0",
+    "dotenv": "^17.3.1",
+    "pg": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "@types/pg": "^8.18.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -39,13 +39,18 @@ async function findNextJob(activeJobIds: Set<string>): Promise<TranscodeJob | nu
   // Build pool filter — if TRANSCODE_POOL is set, only pick jobs for this pool
   const poolFilter = TRANSCODE_POOL ? `AND transcode_pool = '${TRANSCODE_POOL}'` : "";
 
+  // Atomically claim jobs by setting status to 'processing' via UPDATE ... RETURNING
+  // This prevents multiple droplets from grabbing the same job
   const movie = await queryOne<{ id: string; title: string }>(
-    `SELECT id, title FROM content
-     WHERE status IN ('transcoding', 'upgrading') AND type != 'series'
-     ${poolFilter}
-     ${excludeIds.length > 0 ? `AND id != ALL($1)` : ""}
-     ORDER BY transcode_priority DESC, status_updated_at ASC LIMIT 1
-     FOR UPDATE SKIP LOCKED`,
+    `UPDATE content SET status = 'processing', status_updated_at = NOW()
+     WHERE id = (
+       SELECT id FROM content
+       WHERE status IN ('transcoding', 'upgrading') AND type != 'series'
+       ${poolFilter}
+       ${excludeIds.length > 0 ? `AND id != ALL($1)` : ""}
+       ORDER BY transcode_priority DESC, status_updated_at ASC LIMIT 1
+       FOR UPDATE SKIP LOCKED
+     ) RETURNING id, title`,
     excludeIds.length > 0 ? [excludeIds] : []
   );
 
@@ -66,12 +71,15 @@ async function findNextJob(activeJobIds: Set<string>): Promise<TranscodeJob | nu
     id: string; content_id: string; season_number: number;
     episode_number: number; title: string;
   }>(
-    `SELECT se.id, se.content_id, se.season_number, se.episode_number, se.title
-     FROM series_episodes se WHERE se.status IN ('transcoding', 'upgrading')
-     ${poolFilter}
-     ${excludeIds.length > 0 ? `AND se.id != ALL($1)` : ""}
-     ORDER BY se.transcode_priority DESC, se.status_updated_at ASC LIMIT 1
-     FOR UPDATE SKIP LOCKED`,
+    `UPDATE series_episodes SET status = 'processing', status_updated_at = NOW()
+     WHERE id = (
+       SELECT se.id FROM series_episodes se
+       WHERE se.status IN ('transcoding', 'upgrading')
+       ${poolFilter}
+       ${excludeIds.length > 0 ? `AND se.id != ALL($1)` : ""}
+       ORDER BY se.transcode_priority DESC, se.status_updated_at ASC LIMIT 1
+       FOR UPDATE SKIP LOCKED
+     ) RETURNING id, content_id, season_number, episode_number, title`,
     excludeIds.length > 0 ? [excludeIds] : []
   );
 

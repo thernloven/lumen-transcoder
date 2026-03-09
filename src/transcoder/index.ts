@@ -4,6 +4,7 @@ import path from "path";
 import os from "os";
 import { query, queryOne, pool } from "../db";
 import { downloadFromR2, uploadFileToR2, deleteFromR2, fileExistsInR2 } from "../services/r2";
+import { computePhash, probeResolutionHeight } from "./phash";
 
 
 const POLL_INTERVAL = 5000;
@@ -320,6 +321,20 @@ async function processJob(job: TranscodeJob) {
     // Extract embedded subtitles
     await extractSubtitles(inputPath, jobDir, basePath, job.content_id);
 
+    // Compute pHash and resolution on the transcoded file
+    console.log(`[PHASH] Computing pHash: "${job.title}"`);
+    const [phashResult, resHeight] = await Promise.all([
+      computePhash(mp4Path, jobDir).catch((err) => {
+        console.error(`[PHASH] Failed for "${job.title}":`, err);
+        return null;
+      }),
+      probeResolutionHeight(mp4Path),
+    ]);
+
+    if (phashResult) {
+      console.log(`[PHASH] "${job.title}" — ${phashResult.hashes.length} hashes, ${resHeight}p`);
+    }
+
     // Upload processed MP4
     console.log(`[UPLOAD] Uploading MP4: "${job.title}"`);
     await uploadFileToR2(mp4Path, mp4Key, "video/mp4");
@@ -328,14 +343,19 @@ async function processJob(job: TranscodeJob) {
     console.log(`[CLEANUP] Deleting original: ${job.original_key}`);
     await deleteFromR2(job.original_key).catch(() => {});
 
-    // Update status to ready
+    // Update status to ready with pHash data
+    const phashJson = phashResult ? JSON.stringify(phashResult.hashes) : null;
+
     if (job.type === "movie") {
-      await query(`UPDATE content SET status = 'ready', hls_key = $1 WHERE id = $2`, [mp4Key, job.content_id]);
+      await query(
+        `UPDATE content SET status = 'ready', hls_key = $1, phashes = $2, resolution_height = $3, phash_verified = TRUE WHERE id = $4`,
+        [mp4Key, phashJson, resHeight, job.content_id]
+      );
     } else {
       await query(
-        `UPDATE series_episodes SET status = 'ready', hls_key = $1
-         WHERE content_id = $2 AND season_number = $3 AND episode_number = $4`,
-        [mp4Key, job.content_id, job.season_number, job.episode_number]
+        `UPDATE series_episodes SET status = 'ready', hls_key = $1, phashes = $2, resolution_height = $3, phash_verified = TRUE
+         WHERE content_id = $4 AND season_number = $5 AND episode_number = $6`,
+        [mp4Key, phashJson, resHeight, job.content_id, job.season_number, job.episode_number]
       );
     }
 

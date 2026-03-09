@@ -9,8 +9,9 @@ import { computePhash, probeResolutionHeight } from "./phash";
 
 const POLL_INTERVAL = 5000;
 const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT || "2", 10);
-const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || "120000", 10); // 2 min default
+const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || "900000", 10); // 15 min default
 const IS_DROPLET = process.env.TRANSCODER_MODE === "droplet";
+const TRANSCODE_POOL = process.env.TRANSCODE_POOL || ""; // 'free' or 'paid'
 const WORK_DIR = path.join(process.env.TRANSCODE_DIR || os.tmpdir(), "aperture-transcode");
 
 if (!fs.existsSync(WORK_DIR)) {
@@ -33,14 +34,18 @@ interface SubtitleTrack {
 }
 
 async function findNextJob(activeJobIds: Set<string>): Promise<TranscodeJob | null> {
-  // Build exclusion list so concurrent workers don't grab the same job
   const excludeIds = Array.from(activeJobIds);
+
+  // Build pool filter — if TRANSCODE_POOL is set, only pick jobs for this pool
+  const poolFilter = TRANSCODE_POOL ? `AND transcode_pool = '${TRANSCODE_POOL}'` : "";
 
   const movie = await queryOne<{ id: string; title: string }>(
     `SELECT id, title FROM content
-     WHERE status = 'transcoding' AND type != 'series'
+     WHERE status IN ('transcoding', 'upgrading') AND type != 'series'
+     ${poolFilter}
      ${excludeIds.length > 0 ? `AND id != ALL($1)` : ""}
-     ORDER BY created_at ASC LIMIT 1`,
+     ORDER BY transcode_priority DESC, status_updated_at ASC LIMIT 1
+     FOR UPDATE SKIP LOCKED`,
     excludeIds.length > 0 ? [excludeIds] : []
   );
 
@@ -62,9 +67,11 @@ async function findNextJob(activeJobIds: Set<string>): Promise<TranscodeJob | nu
     episode_number: number; title: string;
   }>(
     `SELECT se.id, se.content_id, se.season_number, se.episode_number, se.title
-     FROM series_episodes se WHERE se.status = 'transcoding'
+     FROM series_episodes se WHERE se.status IN ('transcoding', 'upgrading')
+     ${poolFilter}
      ${excludeIds.length > 0 ? `AND se.id != ALL($1)` : ""}
-     ORDER BY se.created_at ASC LIMIT 1`,
+     ORDER BY se.transcode_priority DESC, se.status_updated_at ASC LIMIT 1
+     FOR UPDATE SKIP LOCKED`,
     excludeIds.length > 0 ? [excludeIds] : []
   );
 
@@ -366,14 +373,15 @@ async function processJob(job: TranscodeJob) {
 }
 
 async function selfDestruct() {
-  console.log("[DO] Queue empty, self-destructing droplet...");
+  console.log("[DO] Idle timeout reached, self-destructing droplet...");
   try {
-    // Get our own droplet ID from metadata
+    // Get our own droplet ID from DO metadata service
     const metaRes = await fetch("http://169.254.169.254/metadata/v1/id");
     const dropletId = (await metaRes.text()).trim();
     console.log(`[DO] Droplet ID: ${dropletId}`);
 
-    const delRes = await fetch(`https://api.digitalocean.com/v2/droplets?tag_name=aperture-transcoder`, {
+    // Delete only this specific droplet (not all pool members)
+    const delRes = await fetch(`https://api.digitalocean.com/v2/droplets/${dropletId}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${process.env.DO_API_TOKEN}` },
     });
@@ -392,7 +400,8 @@ async function selfDestruct() {
 
 async function main() {
   const mode = IS_DROPLET ? "droplet (self-destruct enabled)" : "persistent";
-  console.log(`Aperture Transcoder running... (mode: ${mode}, concurrency: ${MAX_CONCURRENT})`);
+  const poolLabel = TRANSCODE_POOL || "all";
+  console.log(`Aperture Transcoder running... (mode: ${mode}, pool: ${poolLabel}, concurrency: ${MAX_CONCURRENT}, idle timeout: ${IDLE_TIMEOUT / 1000}s)`);
 
   // Clean up any leftover temp files on startup
   try { fs.rmSync(WORK_DIR, { recursive: true, force: true }); fs.mkdirSync(WORK_DIR, { recursive: true }); } catch {}

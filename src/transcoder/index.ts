@@ -41,8 +41,9 @@ async function findNextJob(activeJobIds: Set<string>): Promise<TranscodeJob | nu
 
   // Atomically claim jobs by setting status to 'processing' via UPDATE ... RETURNING
   // This prevents multiple droplets from grabbing the same job
+  // Keep 'upgrading' status so content stays playable during re-encode
   const movie = await queryOne<{ id: string; title: string }>(
-    `UPDATE content SET status = 'processing', status_updated_at = NOW()
+    `UPDATE content SET status = CASE WHEN status = 'upgrading' THEN 'upgrading' ELSE 'processing' END, status_updated_at = NOW()
      WHERE id = (
        SELECT id FROM content
        WHERE status IN ('transcoding', 'upgrading') AND type != 'series'
@@ -71,7 +72,7 @@ async function findNextJob(activeJobIds: Set<string>): Promise<TranscodeJob | nu
     id: string; content_id: string; season_number: number;
     episode_number: number; title: string;
   }>(
-    `UPDATE series_episodes SET status = 'processing', status_updated_at = NOW()
+    `UPDATE series_episodes SET status = CASE WHEN status = 'upgrading' THEN 'upgrading' ELSE 'processing' END, status_updated_at = NOW()
      WHERE id = (
        SELECT se.id FROM series_episodes se
        WHERE se.status IN ('transcoding', 'upgrading')

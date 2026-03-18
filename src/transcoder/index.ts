@@ -292,6 +292,32 @@ async function processJob(job: TranscodeJob) {
     await downloadFromR2(job.original_key, inputPath);
     console.log(`[DOWNLOAD] Done (${(fs.statSync(inputPath).size / 1024 / 1024).toFixed(0)} MB)`);
 
+    // Quality gate — reject if new file is lower resolution than existing
+    const newResolution = await probeResolutionHeight(inputPath);
+    const existingRes = job.type === "movie"
+      ? await queryOne<{ resolution_height: number | null }>(`SELECT resolution_height FROM content WHERE id = $1`, [job.content_id])
+      : await queryOne<{ resolution_height: number | null }>(
+          `SELECT resolution_height FROM series_episodes WHERE content_id = $1 AND season_number = $2 AND episode_number = $3`,
+          [job.content_id, job.season_number, job.episode_number]
+        );
+
+    if (existingRes?.resolution_height && newResolution && newResolution < existingRes.resolution_height) {
+      console.log(`[QUALITY] "${job.title}" — new ${newResolution}p is lower than existing ${existingRes.resolution_height}p, skipping`);
+      // Delete the original from R2 and restore status to ready
+      await deleteFromR2(job.original_key).catch(() => {});
+      if (job.type === "movie") {
+        await query(`UPDATE content SET status = 'ready', status_updated_at = NOW() WHERE id = $1`, [job.content_id]);
+      } else {
+        await query(
+          `UPDATE series_episodes SET status = 'ready', status_updated_at = NOW() WHERE content_id = $1 AND season_number = $2 AND episode_number = $3`,
+          [job.content_id, job.season_number, job.episode_number]
+        );
+      }
+      return;
+    }
+
+    console.log(`[QUALITY] "${job.title}" — ${newResolution}p${existingRes?.resolution_height ? ` (existing: ${existingRes.resolution_height}p)` : ""} — proceeding`);
+
     const mp4Key = `${basePath}/stream.mp4`;
     const mp4Path = path.join(jobDir, "stream.mp4");
 

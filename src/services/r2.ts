@@ -5,6 +5,7 @@ import {
   DeleteObjectCommand,
   HeadObjectCommand,
 } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
 import fs from "fs";
 import { env } from "../config/env";
 
@@ -17,16 +18,35 @@ const s3 = new S3Client({
   },
 });
 
+const MULTIPART_THRESHOLD = 2 * 1024 * 1024 * 1024; // 2 GB
+
 export async function uploadFileToR2(localPath: string, key: string, contentType: string): Promise<void> {
+  const fileSize = fs.statSync(localPath).size;
   const body = fs.createReadStream(localPath);
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: env.R2_BUCKET_NAME,
-      Key: key,
-      Body: body,
-      ContentType: contentType,
-    })
-  );
+
+  if (fileSize >= MULTIPART_THRESHOLD) {
+    const upload = new Upload({
+      client: s3,
+      params: {
+        Bucket: env.R2_BUCKET_NAME,
+        Key: key,
+        Body: body,
+        ContentType: contentType,
+      },
+      partSize: 100 * 1024 * 1024, // 100 MB parts
+      leavePartsOnError: false,
+    });
+    await upload.done();
+  } else {
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: env.R2_BUCKET_NAME,
+        Key: key,
+        Body: body,
+        ContentType: contentType,
+      })
+    );
+  }
 }
 
 export async function downloadFromR2(key: string, localPath: string): Promise<void> {

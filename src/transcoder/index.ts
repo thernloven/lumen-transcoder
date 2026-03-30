@@ -322,15 +322,41 @@ async function processJob(job: TranscodeJob) {
     const mp4Key = `${basePath}/stream.mp4`;
     const mp4Path = path.join(jobDir, "stream.mp4");
 
-    // Check if video can be stream-copied (H.264 only)
+    // Probe video bitrate
+    async function probeVideoBitrate(filePath: string): Promise<number | null> {
+      return new Promise((resolve) => {
+        const proc = spawn("ffprobe", [
+          "-v", "quiet",
+          "-select_streams", "v:0",
+          "-show_entries", "stream=bit_rate",
+          "-print_format", "json",
+          filePath,
+        ]);
+        let output = "";
+        proc.stdout.on("data", (data) => { output += data.toString(); });
+        proc.stderr.on("data", () => {});
+        proc.on("close", () => {
+          try {
+            const data = JSON.parse(output);
+            const br = parseInt(data.streams?.[0]?.bit_rate);
+            resolve(isNaN(br) ? null : Math.round(br / 1_000_000 * 10) / 10);
+          } catch { resolve(null); }
+        });
+        proc.on("error", () => resolve(null));
+      });
+    }
+
+    // Check if video can be stream-copied (H.264 + under bitrate cap)
+    const MAX_BITRATE_MBPS = 17;
     const { codec: videoCodec, pixFmt, colorSpace, colorPrimaries, colorTrc, colorRange } = await probeVideoCodec(inputPath);
     const hasAudio = await hasAudioStream(inputPath);
-    const canCopyVideo = videoCodec === "h264";
+    const bitrateMbps = await probeVideoBitrate(inputPath);
+    const canCopyVideo = videoCodec === "h264" && (bitrateMbps === null || bitrateMbps <= MAX_BITRATE_MBPS);
 
     if (canCopyVideo) {
-      console.log(`[REMUX] Copying video (${videoCodec}, ${pixFmt})${hasAudio ? ", re-encoding audio" : ", no audio"}: "${job.title}"`);
+      console.log(`[REMUX] Copying video (${videoCodec}, ${pixFmt}, ${bitrateMbps ? bitrateMbps + " Mbps" : "unknown bitrate"})${hasAudio ? ", re-encoding audio" : ", no audio"}: "${job.title}"`);
     } else {
-      console.log(`[TRANSCODE] Re-encoding video (${videoCodec || "unknown"}, ${pixFmt} → H.264, color: ${colorSpace}/${colorRange})${hasAudio ? "" : ", no audio"}: "${job.title}"`);
+      console.log(`[TRANSCODE] Re-encoding video (${videoCodec || "unknown"}, ${pixFmt}, ${bitrateMbps ? bitrateMbps + " Mbps" : "unknown bitrate"} → H.264 capped at ${MAX_BITRATE_MBPS} Mbps, color: ${colorSpace}/${colorRange})${hasAudio ? "" : ", no audio"}: "${job.title}"`);
     }
 
     const colorArgs: string[] = [];
@@ -343,7 +369,9 @@ async function processJob(job: TranscodeJob) {
 
     const videoArgs = canCopyVideo
       ? ["-c:v", "copy"]
-      : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
+      : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-maxrate", `${MAX_BITRATE_MBPS}M`, "-bufsize", `${MAX_BITRATE_MBPS * 2}M`,
+        "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
         ...colorArgs];
 
     const audioArgs = hasAudio

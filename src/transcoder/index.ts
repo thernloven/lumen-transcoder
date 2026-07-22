@@ -355,11 +355,20 @@ async function processJob(job: TranscodeJob) {
 
     // Probe video bitrate
     async function probeVideoBitrate(filePath: string): Promise<number | null> {
+      // MKV sources frequently omit the per-stream bit_rate tag that MP4/remuxed files
+      // carry (Matroska just doesn't always declare it) — querying stream=bit_rate alone
+      // silently came back null for Dunkirk's source, which fed straight into the
+      // copy-eligibility check's "unknown → assume safe" fallback and skipped the bitrate
+      // gate entirely. Fall back to the container-level format.bit_rate, and if that's
+      // ALSO missing, estimate from file size / duration (includes audio, so this slightly
+      // overestimates video bitrate — the safe direction, since it only makes a file MORE
+      // likely to get re-encoded, never less).
       return new Promise((resolve) => {
         const proc = spawn("ffprobe", [
           "-v", "quiet",
           "-select_streams", "v:0",
           "-show_entries", "stream=bit_rate",
+          "-show_entries", "format=bit_rate,duration,size",
           "-print_format", "json",
           filePath,
         ]);
@@ -369,8 +378,19 @@ async function processJob(job: TranscodeJob) {
         proc.on("close", () => {
           try {
             const data = JSON.parse(output);
-            const br = parseInt(data.streams?.[0]?.bit_rate);
-            resolve(isNaN(br) ? null : Math.round(br / 1_000_000 * 10) / 10);
+            const streamBr = parseInt(data.streams?.[0]?.bit_rate);
+            if (!isNaN(streamBr)) { resolve(Math.round(streamBr / 1_000_000 * 10) / 10); return; }
+
+            const formatBr = parseInt(data.format?.bit_rate);
+            if (!isNaN(formatBr)) { resolve(Math.round(formatBr / 1_000_000 * 10) / 10); return; }
+
+            const size = parseInt(data.format?.size);
+            const duration = parseFloat(data.format?.duration);
+            if (!isNaN(size) && !isNaN(duration) && duration > 0) {
+              resolve(Math.round((size * 8 / duration) / 1_000_000 * 10) / 10);
+              return;
+            }
+            resolve(null);
           } catch { resolve(null); }
         });
         proc.on("error", () => resolve(null));
@@ -390,7 +410,11 @@ async function processJob(job: TranscodeJob) {
     const { codec: videoCodec, pixFmt, colorSpace, colorPrimaries, colorTrc, colorRange } = await probeVideoCodec(inputPath);
     const hasAudio = await hasAudioStream(inputPath);
     const bitrateMbps = await probeVideoBitrate(inputPath);
-    const canCopyVideo = videoCodec === "h264" && (bitrateMbps === null || bitrateMbps <= COPY_ELIGIBLE_MAX_MBPS);
+    // Unknown bitrate must fail SAFE (re-encode), not fail open (copy unchecked). This is
+    // exactly how Dunkirk got through a second time even after lowering the copy gate: its
+    // MKV source had no stream-level bit_rate tag, probeVideoBitrate returned null, and
+    // "null → treat as safe to copy" skipped the gate entirely regardless of the threshold.
+    const canCopyVideo = videoCodec === "h264" && bitrateMbps !== null && bitrateMbps <= COPY_ELIGIBLE_MAX_MBPS;
 
     if (canCopyVideo) {
       console.log(`[REMUX] Copying video (${videoCodec}, ${pixFmt}, ${bitrateMbps ? bitrateMbps + " Mbps" : "unknown bitrate"})${hasAudio ? ", re-encoding audio" : ", no audio"}: "${job.title}"`);

@@ -377,12 +377,20 @@ async function processJob(job: TranscodeJob) {
       });
     }
 
-    // Check if video can be stream-copied (H.264 + under bitrate cap)
+    // Check if video can be stream-copied (H.264 + comfortably under the bitrate cap).
+    // COPY_ELIGIBLE_MAX_MBPS is deliberately well below MAX_BITRATE_MBPS: a copy preserves
+    // the source's bitrate as-is with NO cap on local/peak bitrate, only the file's
+    // declared AVERAGE gets checked here. A VBR encode can look safe on average while still
+    // spiking hard in busy scenes (explosions, fast motion) — exactly what caused Dunkirk to
+    // lag despite averaging 10.2 Mbps: it slipped under the old 17 Mbps copy gate and its
+    // scene-level peaks went out uncapped. Anything above this lower gate now re-encodes,
+    // which DOES enforce a hard peak cap via -maxrate/-bufsize below.
     const MAX_BITRATE_MBPS = 17;
+    const COPY_ELIGIBLE_MAX_MBPS = 8;
     const { codec: videoCodec, pixFmt, colorSpace, colorPrimaries, colorTrc, colorRange } = await probeVideoCodec(inputPath);
     const hasAudio = await hasAudioStream(inputPath);
     const bitrateMbps = await probeVideoBitrate(inputPath);
-    const canCopyVideo = videoCodec === "h264" && (bitrateMbps === null || bitrateMbps <= MAX_BITRATE_MBPS);
+    const canCopyVideo = videoCodec === "h264" && (bitrateMbps === null || bitrateMbps <= COPY_ELIGIBLE_MAX_MBPS);
 
     if (canCopyVideo) {
       console.log(`[REMUX] Copying video (${videoCodec}, ${pixFmt}, ${bitrateMbps ? bitrateMbps + " Mbps" : "unknown bitrate"})${hasAudio ? ", re-encoding audio" : ", no audio"}: "${job.title}"`);

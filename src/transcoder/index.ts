@@ -4,7 +4,7 @@ import path from "path";
 import os from "os";
 import { query, queryOne, pool } from "../db";
 import { downloadFromR2, uploadFileToR2, deleteFromR2, fileExistsInR2 } from "../services/r2";
-import { computePhash, probeResolutionHeight } from "./phash";
+import { computePhash, probeResolutionHeight, compareHashes, FrameHash } from "./phash";
 
 
 const POLL_INTERVAL = 5000;
@@ -293,18 +293,24 @@ async function processJob(job: TranscodeJob) {
     await downloadFromR2(job.original_key, inputPath);
     console.log(`[DOWNLOAD] Done (${(fs.statSync(inputPath).size / 1024 / 1024).toFixed(0)} MB)`);
 
-    // Quality gate — reject if new file is lower resolution than existing
+    // Quality gate. When replacing an existing version, only overwrite it if the new
+    // file is the SAME content (pHash pixel match) AND higher resolution — mirrors the
+    // desktop-upload gate (upload.ts) so torrent packs can't blindly redo/downgrade an
+    // episode you already have, and a mis-matched torrent can't clobber the wrong slot.
     const newResolution = await probeResolutionHeight(inputPath);
-    const existingRes = job.type === "movie"
-      ? await queryOne<{ resolution_height: number | null }>(`SELECT resolution_height FROM content WHERE id = $1`, [job.content_id])
-      : await queryOne<{ resolution_height: number | null }>(
-          `SELECT resolution_height FROM series_episodes WHERE content_id = $1 AND season_number = $2 AND episode_number = $3`,
+    const existing = job.type === "movie"
+      ? await queryOne<{ resolution_height: number | null; phashes: any; phash_verified: boolean }>(
+          `SELECT resolution_height, phashes, phash_verified FROM content WHERE id = $1`, [job.content_id])
+      : await queryOne<{ resolution_height: number | null; phashes: any; phash_verified: boolean }>(
+          `SELECT resolution_height, phashes, phash_verified FROM series_episodes WHERE content_id = $1 AND season_number = $2 AND episode_number = $3`,
           [job.content_id, job.season_number, job.episode_number]
         );
 
-    if (existingRes?.resolution_height && newResolution && newResolution < existingRes.resolution_height) {
-      console.log(`[QUALITY] "${job.title}" — new ${newResolution}p is lower than existing ${existingRes.resolution_height}p, skipping`);
-      // Delete the original from R2 and restore status to ready
+    // Same as upload.ts: <32 avg hamming = same content, higher res = worth replacing.
+    const SAME_CONTENT_MAX_DISTANCE = 32;
+
+    const keepExisting = async (reason: string) => {
+      console.log(`[QUALITY] "${job.title}" — keeping existing (${reason})`);
       await deleteFromR2(job.original_key).catch(() => {});
       if (job.type === "movie") {
         await query(`UPDATE content SET status = 'ready', status_updated_at = NOW() WHERE id = $1`, [job.content_id]);
@@ -314,10 +320,35 @@ async function processJob(job: TranscodeJob) {
           [job.content_id, job.season_number, job.episode_number]
         );
       }
-      return;
+    };
+
+    if (existing?.phash_verified && existing.phashes && existing.resolution_height) {
+      // There's an existing verified version to protect — run the pixel + resolution gate.
+      const storedHashes: FrameHash[] = typeof existing.phashes === "string" ? JSON.parse(existing.phashes) : existing.phashes;
+      const newPhash = await computePhash(inputPath, jobDir).catch((err) => {
+        console.error(`[QUALITY] pHash failed for "${job.title}", falling back to resolution-only:`, err);
+        return null;
+      });
+
+      if (newPhash) {
+        const distance = compareHashes(newPhash.hashes, storedHashes);
+        const sameContent = distance < SAME_CONTENT_MAX_DISTANCE;
+        const higherRes = !!newResolution && newResolution > existing.resolution_height;
+        console.log(`[QUALITY] "${job.title}" — pHash distance ${distance.toFixed(1)}, new ${newResolution}p vs existing ${existing.resolution_height}p`);
+
+        if (!sameContent) { await keepExisting(`different content, pHash distance ${distance.toFixed(1)} ≥ ${SAME_CONTENT_MAX_DISTANCE}`); return; }
+        if (!higherRes)   { await keepExisting(`same content but not higher resolution (${newResolution}p ≤ ${existing.resolution_height}p)`); return; }
+        console.log(`[QUALITY] "${job.title}" — same content, higher quality (${newResolution}p > ${existing.resolution_height}p) — replacing`);
+      } else if (newResolution && newResolution < existing.resolution_height) {
+        // pHash unavailable — fall back to resolution-only
+        await keepExisting(`new ${newResolution}p < existing ${existing.resolution_height}p (pHash unavailable)`); return;
+      }
+    } else if (existing?.resolution_height && newResolution && newResolution < existing.resolution_height) {
+      // Older content without a verified pHash — resolution-only gate (prior behavior).
+      await keepExisting(`new ${newResolution}p < existing ${existing.resolution_height}p`); return;
     }
 
-    console.log(`[QUALITY] "${job.title}" — ${newResolution}p${existingRes?.resolution_height ? ` (existing: ${existingRes.resolution_height}p)` : ""} — proceeding`);
+    console.log(`[QUALITY] "${job.title}" — ${newResolution}p${existing?.resolution_height ? ` (existing: ${existing.resolution_height}p)` : ""} — proceeding`);
 
     const mp4Key = `${basePath}/stream.mp4`;
     const mp4Path = path.join(jobDir, "stream.mp4");

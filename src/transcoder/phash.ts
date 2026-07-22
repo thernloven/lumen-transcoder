@@ -155,3 +155,28 @@ export function probeResolutionHeight(inputPath: string): Promise<number | null>
     proc.on("error", () => resolve(null));
   });
 }
+
+function popcount64(n: bigint): number {
+  let count = 0;
+  let bits = n;
+  while (bits > 0n) {
+    bits &= bits - 1n;
+    count++;
+  }
+  return count;
+}
+
+// Average per-frame Hamming distance (out of 64) between two frame-hash sequences.
+// Identical algorithm to aperture-backend (upload.ts compareFrameHashes / verifier
+// compareHashes) so the torrent quality gate and the desktop-upload gate agree.
+export function compareHashes(a: FrameHash[], b: FrameHash[]): number {
+  if (a.length === 0 || b.length === 0) return 64;
+  const count = Math.min(a.length, b.length);
+  let totalDistance = 0;
+  for (let i = 0; i < count; i++) {
+    const ha = BigInt("0x" + a[i].hash);
+    const hb = BigInt("0x" + b[i].hash);
+    totalDistance += popcount64(ha ^ hb);
+  }
+  return totalDistance / count;
+}

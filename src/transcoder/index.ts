@@ -405,7 +405,16 @@ async function processJob(job: TranscodeJob) {
     // lag despite averaging 10.2 Mbps: it slipped under the old 17 Mbps copy gate and its
     // scene-level peaks went out uncapped. Anything above this lower gate now re-encodes,
     // which DOES enforce a hard peak cap via -maxrate/-bufsize below.
-    const MAX_BITRATE_MBPS = 17;
+    // Bufsize == maxrate (a 1s VBV window, was 2x/2s) so the encoder can't sustain a high
+    // rate for long — measured on Dunkirk: with the old 17M/34M (2s window) it held 10-39
+    // CONSECUTIVE seconds at 13-17+ Mbps (peaking 27.92 Mbps in a single second) during its
+    // long action sequences, while comparison titles (Backrooms, Obsession) only ever spiked
+    // for 1-4s, which a 2s buffer smooths out fine. A 10-40s sustained near-ceiling demand is
+    // what a plain <video> tag with no adaptive bitrate can't reliably sustain over a real
+    // connection — a tighter window forces the encoder to average down much sooner instead of
+    // "borrowing" against the buffer for that long. Ceiling also lowered (17 → 12) since 17
+    // Mbps sustained for any real duration is already a lot to ask without ABR fallback.
+    const MAX_BITRATE_MBPS = 12;
     const COPY_ELIGIBLE_MAX_MBPS = 8;
     const { codec: videoCodec, pixFmt, colorSpace, colorPrimaries, colorTrc, colorRange } = await probeVideoCodec(inputPath);
     const hasAudio = await hasAudioStream(inputPath);
@@ -433,7 +442,7 @@ async function processJob(job: TranscodeJob) {
     const videoArgs = canCopyVideo
       ? ["-c:v", "copy"]
       : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-maxrate", `${MAX_BITRATE_MBPS}M`, "-bufsize", `${MAX_BITRATE_MBPS * 2}M`,
+        "-maxrate", `${MAX_BITRATE_MBPS}M`, "-bufsize", `${MAX_BITRATE_MBPS}M`,
         "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
         ...colorArgs];
 

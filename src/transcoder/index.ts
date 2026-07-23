@@ -439,10 +439,23 @@ async function processJob(job: TranscodeJob) {
       colorArgs.push("-color_range", colorRange || "tv");
     }
 
+    // Fixed 2s GOP (48 frames @ ~24fps), scene-cut-adaptive keyframes disabled. Without
+    // this, x264 defaults to scene-cut-triggered keyframes with only a ~10s MAX interval
+    // fallback for long cuts — measured on Dunkirk: keyframe gaps ranged 1-10s, with 107
+    // separate ~10.4s gaps landing disproportionately during its long, cut-light action
+    // sequences (fewer scene changes → more reliance on the 10s fallback). A keyframe is a
+    // full standalone frame, much larger than the P/B-frames around it — an irregular
+    // schedule that clusters those bursts right in the busiest scenes is a plausible
+    // stutter source independent of the average-bitrate VBV fix already in place (VBV
+    // bounds *how much* data flows per window, not *how evenly spaced* the big frames are
+    // within it). A short fixed GOP makes every keyframe smaller and evenly distributed,
+    // regardless of scene-cut frequency.
+    const GOP_FRAMES = 48;
     const videoArgs = canCopyVideo
       ? ["-c:v", "copy"]
       : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-maxrate", `${MAX_BITRATE_MBPS}M`, "-bufsize", `${MAX_BITRATE_MBPS}M`,
+        "-g", `${GOP_FRAMES}`, "-keyint_min", `${GOP_FRAMES}`, "-sc_threshold", "0",
         "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
         ...colorArgs];
 
